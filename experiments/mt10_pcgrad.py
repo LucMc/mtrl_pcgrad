@@ -10,6 +10,7 @@ from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import MetaworldConfig
 from mtrl.experiment import Experiment
 from mtrl.rl.algorithms import PCGrad
+from mtrl.rl.algorithms.pcgrad import PCGradConfig
 
 
 @dataclass(frozen=True)
@@ -25,14 +26,14 @@ def main() -> None:
     args = tyro.cli(Args)
 
     experiment = Experiment(
-        exp_name="mt10_mtmhsac",
+        exp_name="mt10_mtmhpcgrad",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
             env_id="MT10",
             terminate_on_success=False,
         ),
-        algorithm=PCGrad(
+        algorithm=PCGradConfig(
             num_tasks=10,
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
