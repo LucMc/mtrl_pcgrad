@@ -207,14 +207,14 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
     @staticmethod
     @jax.jit
-    # @partial(jax.jit, static_argnums=(0,1,2,3,4,5))
+    # @partial(jax.jit, static_argnames="num_tasks")
     def compute_pcgrad(
         critic: CriticTrainState,
         data: ReplayBufferSamples, 
         task_ids: Float[Array, "batch num_tasks"],
         alpha_val: Float[Array, "batch 1"],
         next_q_value: Float[Array, "batch 1"],
-        # num_tasks: int,
+        num_tasks: int,
         ) -> tuple[Array, LogDict]:
         num_tasks = 10
 
@@ -264,50 +264,22 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         final_grad = unravel_fn(avg_grad)
         
         metrics = {
-            "metrics/pcgrad_avg_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1))
-            # "metrics/pcgrad_avg_cosine_similarity": jnp.mean(
-            #     jnp.array([
-            #         jnp.sum(task_grads[i] * task_grads[j]) / (
-            #             jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
-            #         )
-            #         for i in range(num_tasks)
-            #         for j in range(i + 1, num_tasks)
-            #     ])
-            # )
+            "metrics/pcgrad_avg_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+            "metrics/pcgrad_avg_cosine_similarity": jnp.mean(
+                jnp.array([
+                    jnp.sum(task_grads[i] * task_grads[j]) / (
+                        jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
+                    )
+                    for i in range(num_tasks)
+                    for j in range(i + 1, num_tasks)
+                ])
+            )
         }
         return final_grad, metrics
-
-    # @partial(jax.jit, static_argnums=(0,))
-    # def compute_pcgrad2(
-    #     self,
-    #     critic: CriticTrainState,
-    #     data: ReplayBufferSamples, 
-    #     task_ids: Float[Array, "batch num_tasks"],
-    #     alpha_val: Float[Array, "batch 1"],
-    #     next_q_value: Float[Array, "batch 1"],
-    #     num_tasks: int
-    # ) -> tuple[Array, LogDict]:
-    #
-    #
-    #     def get_task_grad(task_idx: int) -> Array:
-    #         task_mask = task_ids[:, task_idx] == 1
-    #         
-    #         def task_loss(params: FrozenDict) -> Float[Array, ""]:
-    #             q_pred = critic.apply_fn(params, data.observations, data.actions)
-    #             loss = 0.5 * ((q_pred - next_q_value) ** 2 * task_mask[:, None]).mean()
-    #             return loss
-    #             
-    #         grad = jax.grad(task_loss)(critic.params)
-    #         flat_grad, _ = jax.flatten_util.ravel_pytree(grad)
-    #         return flat_grad
-    #
-    #     return jnp.array([0]), {}
 
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
-        # for task_idx in range(self.num_tasks):# Optimize using vmap etc later
-        #     task_mask = task_ids[:, task_idx] == 1
         
         # --- Critic loss ---
         key, actor_loss_key, critic_loss_key = jax.random.split(self.key, 3)
@@ -322,15 +294,10 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             next_actions, next_action_log_probs = self.actor.apply_fn(
                 self.actor.params, data.next_observations
             ).sample_and_log_prob(seed=critic_loss_key)
-            # Compute target Q values
+
             q_values = self.critic.apply_fn(
                 self.critic.target_params, data.next_observations, next_actions
             )
-
-            # def critic_loss(
-            #     params: FrozenDict,
-            # ) -> tuple[Float[Array, ""], Float[Array, ""]]:
-            # next_action_log_probs is (B,) shaped because of the sum(axis=1), while Q values are (B, 1)
 
             min_qf_next_target = jnp.min(
                 q_values, axis=0
@@ -346,35 +313,18 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
                 jnp.array(task_ids),
                 alpha_val,
                 next_q_value,
-                # self.num_tasks
+                self.num_tasks
             )
 
             _critic = _critic.apply_gradients(grads=critic_grads)
-            # q_pred = self.critic.apply_fn(params, data.observations, data.actions) if self.use_task_weights:
-            #     assert task_weights is not None
-            #     loss = (
-            #         0.5
-            #         * (task_weights * (q_pred - next_q_value) ** 2)
-            #         .mean(axis=1)
-            #         .sum()
-            #     )
-            # else:
-            #     loss = 0.5 * ((q_pred - next_q_value) ** 2).mean(axis=1).sum()
-            # return loss, q_pred.mean()
-
-            # (critic_loss_value, qf_values), critic_grads = jax.value_and_grad(
-            #     critic_loss, has_aux=True
-            # )(_critic.params)
-
-            # _critic = _critic.apply_gradients(grads=critic_grads)
-            # flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
-
+            
+            # For metrics - TODO: Improve performance
             q_pred = _critic.apply_fn(_critic.params, data.observations, data.actions)
             qf_loss = 0.5 * ((q_pred - next_q_value) ** 2).mean()
     
             return _critic , {
-                # "losses/qf_values": qf_values, # Sort these out later
-                # "losses/qf_loss": critic_loss_value,
+                "losses/qf_values": q_pred, # Sort these out later
+                "losses/qf_loss": qf_loss,
                 # "metrics/critic_grad_magnitude": jnp.linalg.norm(flat_grads),
             }
 
