@@ -1,5 +1,7 @@
 """Inspired by https:self.//github.com/kevinzakka/robopianist-rl/blob/main/sac.py"""
+import time
 
+# from jax.experimental.static_array import static_args
 import dataclasses
 from functools import partial
 from typing import Self, override
@@ -205,22 +207,18 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
     def eval_action(self, observation: Observation) -> tuple[Action, AuxPolicyOutputs]:
         return jax.device_get(_eval_action(self.actor, observation)), {}
 
+
     @staticmethod
-    @jax.jit
-    # @partial(jax.jit, static_argnames="num_tasks")
+    @partial(jax.jit, static_argnums=(4,))  # Specify the index of num_tasks argument
     def compute_pcgrad(
         critic: CriticTrainState,
         data: ReplayBufferSamples, 
         task_ids: Float[Array, "batch num_tasks"],
-        alpha_val: Float[Array, "batch 1"],
+        # alpha_val: Float[Array, "batch 1"],
         next_q_value: Float[Array, "batch 1"],
         num_tasks: int,
         ) -> tuple[Array, LogDict]:
-        num_tasks = 10
 
-        num_tasks_arr = jnp.arange(10) #  So it jits... try using partial
-
-        # @jax.jit
         def get_task_grad(task_idx: int) -> Array:
             task_mask = task_ids[:, task_idx] == 1
             
@@ -235,26 +233,74 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
 
         # Get gradients for each task using vmap
-        task_grads = jax.vmap(get_task_grad)(num_tasks_arr)
+        task_grads = jax.vmap(get_task_grad)(jnp.arange(num_tasks))
 
         # PCGrad projection
-        @jax.jit
         def project_grad(grad_i: Array, grad_j: Array) -> Array:
             dot_product = jnp.sum(grad_i * grad_j)
+            grad_conflicts = jnp.sum(dot_product < 0) # for metrics
             return jnp.where(
                 dot_product < 0,
                 grad_i - (dot_product * grad_j) / (jnp.sum(grad_j * grad_j) + 1e-12),
                 grad_i
-            )
+            ), grad_conflicts
 
         # Project gradients
         final_grads = task_grads
+        total_grad_conflicts = 0
+
         for i in range(num_tasks):
             for j in range(num_tasks):
                 if i != j:
-                    final_grads = final_grads.at[i].set(
-                        project_grad(final_grads[i], task_grads[j])
-                    )
+                    f_grads, grad_conflicts = project_grad(final_grads[i], task_grads[j])
+                    final_grads = final_grads.at[i].set(f_grads)
+                    total_grad_conflicts += grad_conflicts
+
+
+        ########
+        # looped_final_grads = final_grads
+        # indices = jnp.arange(num_tasks)
+        # final_grads = task_grads
+        #
+        # def update_grads(final_grads, task_grads):
+        #     def project_if_different(i, j, grads):
+        #         return jax.lax.cond(
+        #             i != j,
+        #             lambda x: project_grad(x[0], x[1]),
+        #             lambda x: x[0],
+        #             (grads[i], task_grads[j])
+        #         )
+        #     
+        #     return jax.vmap(lambda i: jax.vmap(lambda j: project_if_different(i, j, final_grads))(indices))(indices)
+        #
+        # final_grads = update_grads(final_grads, task_grads)[:,-1,:]
+        #####
+        # indices = jnp.arange(num_tasks)
+        # final_grads = task_grads
+        # def update_grads(final_grads, task_grads):
+        #     def project_if_different(i, j, grads):
+        #         return jax.lax.cond(
+        #             i != j,
+        #             lambda x: project_grad(x[0], x[1]),
+        #             lambda x: x[0],
+        #             (grads[i], task_grads[j])
+        #         )
+        #     
+        #     # Use scan to apply projections sequentially
+        #     def scan_proj(carry, j):
+        #         return carry.at[j].set(
+        #             jax.vmap(lambda i: project_if_different(i, j, carry))(indices)
+        #         ), None
+        #     
+        #     final_result, _ = jax.lax.scan(scan_proj, final_grads, indices)
+        #     return final_result
+        #
+        # final_grads = update_grads(final_grads, task_grads)
+        # try:
+        #     assert jnp.array_equal(looped_final_grads, final_grads)
+        # except:
+        #     breakpoint()
+        ########
 
         # Average projected gradients
         avg_grad = jnp.mean(final_grads, axis=0)
@@ -262,22 +308,38 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         # Unravel back to pytree
         _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
         final_grad = unravel_fn(avg_grad)
-        
-        metrics = {
-            "metrics/pcgrad_avg_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
-            "metrics/pcgrad_avg_cosine_similarity": jnp.mean(
+
+        # Metrics
+
+        avg_cos_sim = jnp.mean(
                 jnp.array([
                     jnp.sum(task_grads[i] * task_grads[j]) / (
                         jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
                     )
                     for i in range(num_tasks)
                     for j in range(i + 1, num_tasks)
-                ])
-            )
+                ]))
+
+        new_cos_sim = jnp.mean(
+                jnp.array([
+                    jnp.sum(final_grads[i] * final_grads[j]) / (
+                        jnp.linalg.norm(final_grads[i]) * jnp.linalg.norm(final_grads[j]) + 1e-12
+                    )
+                    for i in range(num_tasks)
+                    for j in range(i + 1, num_tasks)
+                ]))
+
+        metrics = {
+            "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
+            "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+            "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
+            "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
+        "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
+            
         }
         return final_grad, metrics
 
-    @jax.jit
+    # @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
         
@@ -311,7 +373,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
                 _critic, 
                 data,
                 jnp.array(task_ids),
-                alpha_val,
+                # alpha_val,
                 next_q_value,
                 self.num_tasks
             )
