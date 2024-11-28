@@ -1,6 +1,5 @@
 """Inspired by https:self.//github.com/kevinzakka/robopianist-rl/blob/main/sac.py"""
 import time
-import numpy as np
 
 # from jax.experimental.static_array import static_args
 import dataclasses
