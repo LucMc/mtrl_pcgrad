@@ -275,8 +275,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
         final_grad = unravel_fn(avg_grad)
 
-            
-        # Metrics 
+        # Metrics
         avg_cos_sim = jnp.mean(
                 jnp.array([
                     jnp.sum(task_grads[i] * task_grads[j]) / (
@@ -302,10 +301,10 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
         "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
             
-        }       
+        }
         return final_grad, metrics
 
-    @jax.jit
+    # @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
         

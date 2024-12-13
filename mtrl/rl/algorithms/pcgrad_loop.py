@@ -237,36 +237,25 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         task_grads = jax.vmap(get_task_grad)(jnp.arange(num_tasks))
 
         # PCGrad projection
-        def project_grads(xy) -> jax.Array:
-            x, y = xy
-            dot = jnp.dot(x, y)
-            grad_conflicts = dot < 0
-            return jnp.where(grad_conflicts, x - (dot * y) / (jnp.sum(y**2) + 1e-8), x), grad_conflicts.sum()  # pyright: ignore[reportReturnType]
+        def project_grad(grad_i: Array, grad_j: Array) -> Array:
+            dot_product = jnp.sum(grad_i * grad_j)
+            grad_conflicts = jnp.sum(dot_product < 0) # for metrics
+            return jnp.where(
+                dot_product < 0,
+                grad_i - (dot_product * grad_j) / (jnp.sum(grad_j * grad_j) + 1e-12),
+                grad_i
+            ), grad_conflicts
 
         # Project gradients
-        def pcgrad_vmap(num_tasks, task_grads):
+        final_grads = task_grads
+        total_grad_conflicts = 0
 
-
-            @partial(jax.vmap, in_axes=(0, 0, None), out_axes=0)
-            def p_grads(
-                task_gradient: Float[Array, " gradient_dim"],
-                i: Float[Array, ""],
-                all_grads: Float[Array, " num_tasks gradient_dim"],
-            ) -> Float[Array, " gradient_dim"]:
-
-                g_i_pc = task_gradient
-                total = 0
-                for j in range(all_grads.shape[0]):
-                   g_i_pc, confs = jax.lax.cond(i != j, (g_i_pc, all_grads[j]), project_grads, g_i_pc, lambda x: (x,0))
-                   total += confs
-                return g_i_pc, total
-
-            # (num_tasks, gradient_dim)
-            res, total = p_grads(task_grads, jnp.arange(num_tasks), task_grads)
-            total = total.sum() / 2
-            return res, total
-        
-        final_grads, total_grad_conflicts = pcgrad_vmap(num_tasks, task_grads)
+        for i in range(num_tasks):
+            for j in range(num_tasks):
+                if i != j:
+                    f_grads, grad_conflicts = project_grad(final_grads[i], task_grads[j])
+                    final_grads = final_grads.at[i].set(f_grads)
+                    total_grad_conflicts += grad_conflicts
 
         # Average projected gradients
         avg_grad = jnp.mean(final_grads, axis=0)
@@ -275,8 +264,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
         final_grad = unravel_fn(avg_grad)
 
-            
-        # Metrics 
+        # Metrics
         avg_cos_sim = jnp.mean(
                 jnp.array([
                     jnp.sum(task_grads[i] * task_grads[j]) / (
@@ -302,10 +290,10 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
         "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
             
-        }       
+        }
         return final_grad, metrics
 
-    @jax.jit
+    # @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
         
