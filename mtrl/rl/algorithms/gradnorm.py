@@ -96,7 +96,7 @@ def extract_task_weights(
 
 
 @dataclasses.dataclass(frozen=True)
-class PCGradConfig(AlgorithmConfig):
+class GradNormConfig(AlgorithmConfig):
     actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
     critic_config: QValueFunctionConfig = QValueFunctionConfig()
     temperature_optimizer_config: OptimizerConfig = OptimizerConfig(max_grad_norm=None)
@@ -106,7 +106,7 @@ class PCGradConfig(AlgorithmConfig):
     use_task_weights: bool = False
 
 
-class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
+class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     actor: TrainState
     critic: CriticTrainState
     alpha: TrainState
@@ -120,8 +120,8 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
     @override
     @staticmethod
     def initialize(
-        config: PCGradConfig, env_config: EnvConfig, seed: int = 1
-    ) -> "PCGrad":
+        config: GradNormConfig, env_config: EnvConfig, seed: int = 1
+    ) -> "GradNorm":
         assert isinstance(
             env_config.action_space, gym.spaces.Box
         ), "Non-box spaces currently not supported."
@@ -177,7 +177,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
         target_entropy = -np.prod(env_config.action_space.shape).item()
 
-        return PCGrad(
+        return GradNorm(
             num_tasks=config.num_tasks,
             actor=actor,
             critic=critic,
@@ -211,7 +211,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
     @staticmethod
     @partial(jax.jit, static_argnums=(4,))  # Specify the index of num_tasks argument
-    def compute_pcgrad(
+    def compute_gradnorm(
         critic: CriticTrainState,
         data: ReplayBufferSamples, 
         task_ids: Float[Array, "batch num_tasks"],
@@ -235,16 +235,22 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
         # Get gradients for each task using vmap
         task_grads = jax.vmap(get_task_grad)(jnp.arange(num_tasks))
+        '''
+        GRADNORM ALGORITHM:
+            - Save original loss
+            - Calculate improvement fraction as: (initial loss/loss now) remember div by 0 so add 1e-15 or something
+            - Normalise losses by weighting them based on if they're improving too quickly or not quick enough
+            - Use parameter alpha to determine how much to weight by
+            - Change fixed alpha to being an actual hyperparameter, maybe choose a different letter?
 
-        # PCGrad projection
-        def project_grads(xy) -> jax.Array:
-            x, y = xy
-            dot = jnp.dot(x, y)
-            grad_conflicts = dot < 0
-            return jnp.where(grad_conflicts, x - (dot * y) / (jnp.sum(y**2) + 1e-8), x), grad_conflicts.sum()  # pyright: ignore[reportReturnType]
+            \tilde{L}_i(t) / L_i(0) # Loss ratio, aka inverse training rate
+            r_i(t) = \tilde{L}_i(t) / E_{task}[\tilde{L}_i(t)] # The *relative* inverse training rate
+            ... Define G (task grad) and \bar{G} (avg grad) similarly
+
+        '''
 
         # Project gradients
-        def pcgrad_vmap(num_tasks, task_grads): # Remove num_tasks?
+        def gradnorm_vmap(num_tasks, task_grads): # Remove num_tasks?
             @partial(jax.vmap, in_axes=(0, 0, None), out_axes=0)
             def p_grads(
                 task_gradient: Float[Array, " gradient_dim"],
@@ -264,7 +270,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             total = total.sum() / 2
             return res, total
         
-        final_grads, total_grad_conflicts = pcgrad_vmap(num_tasks, task_grads)
+        final_grads, total_grad_conflicts = gradnorm_vmap(num_tasks, task_grads)
 
         # Average projected gradients
         avg_grad = jnp.mean(final_grads, axis=0)
@@ -275,8 +281,7 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
             
         # Metrics 
-        # Fix this
-        def calc_cos_sim(task_grads, num_tasks):
+        def calc_cos_sim(task_grads, num_taks):
             avg_cos_sim = jnp.mean(
                     jnp.array([
                         jnp.sum(task_grads[i] * task_grads[j]) / (
@@ -303,11 +308,11 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
         breakpoint()
         metrics = {
-            "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
-            "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
-            "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
-            "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
-        "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
+            "metrics/gradnorm_n_grad_conflicts": total_grad_conflicts,
+            "metrics/gradnorm_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+            "metrics/gradnorm_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
+            "metrics/gradnorm_avg_cosine_similarity":  avg_cos_sim,
+        "metrics/gradnorm_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
             
         }       
         return final_grad, metrics
@@ -341,8 +346,8 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
                 data.rewards + (1 - data.dones) * self.gamma * min_qf_next_target
             )
 
-            # Compute PCGrad update
-            critic_grads, metrics = PCGrad.compute_pcgrad(
+            # Compute GradNorm update
+            critic_grads, metrics = GradNorm.compute_gradnorm(
                 _critic, 
                 data,
                 jnp.array(task_ids),

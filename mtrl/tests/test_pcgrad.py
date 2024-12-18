@@ -62,9 +62,9 @@ def pcgrad_loop(num_tasks, task_grads):
     for i in range(num_tasks):
             for j in range(num_tasks):
                 if i != j:
-                    print(i,j)
+                    # print(i,j)
                     f_grads, grad_conflicts = project_grad(final_grads[i], task_grads[j])
-                    print(f_grads)
+                    # print(f_grads)
                     final_grads = final_grads.at[i].set(f_grads)
                     total_grad_conflicts += grad_conflicts
     
@@ -107,7 +107,7 @@ def pcgrad_vmap_old(num_tasks, task_grads):
                             f_grads[1,1],
                             f_grads[2,2]])
 
-    print("f_grads old vmap:\n", f_grads)
+    # print("f_grads old vmap:\n", f_grads)
     return f_grads_exp, sum(g_conflicts) 
 
 def project_gradients(xy) -> jax.Array:
@@ -136,8 +136,6 @@ def pcgrad_vmap(num_tasks, task_grads):
     # (num_tasks, gradient_dim)
     res, total = p_grads(task_grads, jnp.arange(num_tasks), task_grads)
     total = total.sum() / 2
-    # print(res.shape)
-    # print(res)
     return res, total
 
 
@@ -252,9 +250,9 @@ class TestPCGrad:
             assert jnp.array_equal(new_grads, grads)
             assert new_conflicts == 0
 
-            print("conflicts:\n", conflicts)
-            print("exp_g:\n", exp_g)
-            print("grads:\n", grads)
+            # print("conflicts:\n", conflicts)
+            # print("exp_g:\n", exp_g)
+            # print("grads:\n", grads)
             assert conflicts == 1
             assert jnp.array_equal(grads, exp_g)
 
@@ -277,7 +275,7 @@ class TestPCGrad:
             assert jnp.array_equal(grads, exp_g)
         
             new_grads, new_conflicts = pcgrad_fn(3, grads)
-            print("new_conflicts:\n", new_conflicts) # There is a grad conflict after??
+            # print("new_conflicts:\n", new_conflicts) # There is a grad conflict after??
             # assert jnp.array_equal(new_grads, grads)
             # assert new_conflicts == 0
 
@@ -291,10 +289,140 @@ class TestPCGrad:
         # mtsac_updated_critic = mtsac.update_inner()
         # pcgrad_updated_critic = pcgrad.update_inner()
 
-    def test_grad_diff(self):
-        '''Test the gradients are different to regular SAC grads'''
-        pass
-    
+   ############################################################################## 
+   ################################ METRICS ##################################### 
+   ############################################################################## 
+
+    def test_metrics(self):
+        def testcases():
+
+            testcases = []
+
+            g  = jnp.array([
+                [1.0, 0.0],   # Task 1
+                [-1.0, 0.0],  # Task 2
+                [0.0, 1.0]    # Task 3
+            ])
+            exp_g  = jnp.array([
+                [0.0, 0.0],   # Task 1
+                [0.0, 0.0],  # Task 2
+                [0.0, 1.0]    # Task 3
+            ])
+
+            testcases.append((g, exp_g))
+
+            # Test Case 5: Partial conflicts in triangle
+            # Expected: All tasks have some conflict but not complete cancellation
+            g = jnp.array([
+                [1.0, 1.0],    # Task 1 
+                [-1.0, 1.0],   # Task 2 conflicts with 1
+                [0.0, -1.0]    # Task 3 conflicts with 1
+            ]) # Since each conf happens twice (T1/T2 and T2/T1) means 4 total
+
+            exp_g = jnp.array([
+                [1.0, 0.0],    
+                [-1.0, 0.0],  
+                [0.0, -0.0]  
+            ])
+            testcases.append((g, exp_g))
+            return testcases
+
+
+        def metrics_loop(task_grads, final_grads, num_tasks):
+            # Metrics
+            avg_cos_sim = jnp.mean(
+                    jnp.array([
+                        jnp.sum(task_grads[i] * task_grads[j]) / (
+                            jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
+                        )
+                        for i in range(num_tasks)
+                        for j in range(i + 1, num_tasks)
+                    ]))
+
+            new_cos_sim = jnp.mean(
+                    jnp.array([
+                        jnp.sum(final_grads[i] * final_grads[j]) / (
+                            jnp.linalg.norm(final_grads[i]) * jnp.linalg.norm(final_grads[j]) + 1e-12
+                        )
+                        for i in range(num_tasks)
+                        for j in range(i + 1, num_tasks)
+                    ]))
+
+            metrics = {
+                # "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
+                "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+                "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
+                "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
+            "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
+                
+            }
+            return metrics
+
+
+        def metrics_vmap(task_grads, final_grads, num_taks):
+            '''
+            When calculating the cosine similarity between each task grad and final grad?
+            Or cosine similarity between each task and all other tasks
+             - Calculate cossine between one task and the next task
+             - Caldulate vmap to get all the cos sims between all tasks
+             - Use cond? Or tri or diag to basically just get the task A-> B since B->A is the same
+            '''
+
+            # cos_sim = jnp.array([ jnp.dot(task_grad, final_gradient) / 
+            #                     (jnp.linalg.norm(task_gradient) * jnp.linalg.norm(task_grads[j]) + 1e-12)
+            #
+            #     ])
+
+            avg_cos_sim = jnp.array([ # Removed the jnp.mean
+                            jnp.sum(task_grads[i] * task_grads[j]) / (
+                                    jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
+                                    )
+                            for i in range(num_tasks)
+                            for j in range(i + 1, num_tasks)
+                            ])
+
+            print("avg_cos_sim:\n", avg_cos_sim)
+
+            def calc_cos_sim(task_gradient, compare_gradient, num_tasks):
+
+                new_cos_sim = jnp.array([
+                            jnp.sum(task_gradient * compare_gradient) / (
+                                jnp.linalg.norm(task_gradient) * jnp.linalg.norm(compare_gradient) + 1e-12
+                            )
+                        ])
+
+                avg_cos_sim = jnp.array([None])
+                return avg_cos_sim, new_cos_sim
+
+                # Loop through j's
+                # jax.vmap(inner_loop)
+
+            # Loop through i's
+            with jax.disable_jit():
+                inner_loop = jax.vmap(calc_cos_sim, in_axes=(0, 0, None))
+                outer_loop = jax.vmap(inner_loop, in_axes=(0, 0, None))
+                avg_cos_sim, new_cos_sim = outer_loop(task_grads, task_grads, num_taks) # Should be for every i,j
+                avg_cos_sim, new_cos_sim = outer_loop(task_grads, final_grads, num_taks) # Should be for every i,j
+                breakpoint()
+
+            metrics = {
+                # "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
+                "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+                "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
+                "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
+            "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
+            }
+            return metrics
+
+        num_tasks = 3
+        for g, exp_g in testcases():
+            print("\nmetrics_loop:")
+            print(metrics_loop(g, exp_g, num_tasks))
+
+            print("\nmetrics_vmap:")
+            print(metrics_vmap(g, exp_g, num_tasks))
+
+
     '''
 
     def p_grads(i): 
