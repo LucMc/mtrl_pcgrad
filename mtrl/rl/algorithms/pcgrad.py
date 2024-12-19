@@ -273,23 +273,24 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
         final_grad = unravel_fn(avg_grad)
 
-            
         # Metrics 
-        def vmap_cos_sim(task_grad, num_tasks):
-            def calc_cos_sim(selected_task_grad, task_grads, num_tasks):
+        def vmap_cos_sim(grads, num_tasks):
+            def calc_cos_sim(selected_grad, grads):
 
                 new_cos_sim  = jnp.array([ # Removed the jnp.mean
-                                jnp.sum(selected_task_grad * task_grads, axis=1) / (
-                                        jnp.linalg.norm(selected_task_grad) * jnp.linalg.norm(task_grads, axis=1) + 1e-12
+                                jnp.sum(selected_grad * grads, axis=1) / (
+                                        jnp.linalg.norm(selected_grad) * jnp.linalg.norm(grads, axis=1) + 1e-12
                                         )
                                 ])
 
                 return new_cos_sim
 
-            cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None,None), out_axes=-1)(task_grads, task_grads, num_tasks)
+            cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None), out_axes=-1)(grads, grads)
             mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1) # Get upper triangle
+            num_unique = jnp.sum(mask)
+
             masked_cos_sim = mask * cos_sim_mat
-            avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_tasks
+            avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_unique # n in upper triangle
             return avg_cos_sim
         
         avg_cos_sim = vmap_cos_sim(task_grads, num_tasks)
@@ -301,7 +302,6 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
             "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
         "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
-            
         }       
         return final_grad, metrics
 
@@ -349,12 +349,14 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
             # For metrics - TODO: Improve performance
             q_pred = _critic.apply_fn(_critic.params, data.observations, data.actions)
             qf_loss = 0.5 * ((q_pred - next_q_value) ** 2).mean()
-    
-            return _critic , {
+
+            metrics.update({
                 "losses/qf_values": q_pred, # Sort these out later
                 "losses/qf_loss": qf_loss,
                 # "metrics/critic_grad_magnitude": jnp.linalg.norm(flat_grads),
-            }
+            })
+    
+            return _critic , metrics
 
         # --- Alpha loss ---
 
@@ -529,3 +531,4 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
                 metrics[f"metrics/srank_critic_{i}_{key}"] = compute_srank(value)
 
         return self, metrics
+
