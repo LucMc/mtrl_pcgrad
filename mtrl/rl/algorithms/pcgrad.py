@@ -275,33 +275,26 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
 
             
         # Metrics 
-        # Fix this
-        def calc_cos_sim(task_grads, num_tasks):
-            avg_cos_sim = jnp.mean(
-                    jnp.array([
-                        jnp.sum(task_grads[i] * task_grads[j]) / (
-                            jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
-                            )
-                        for i in range(num_tasks)
-                        for j in range(i + 1, num_tasks)
-                        ]))
+        def vmap_cos_sim(task_grad, num_tasks):
+            def calc_cos_sim(selected_task_grad, task_grads, num_tasks):
 
-            new_cos_sim = jnp.mean(
-                    jnp.array([
-                        jnp.sum(final_grads[i] * final_grads[j]) / (
-                            jnp.linalg.norm(final_grads[i]) * jnp.linalg.norm(final_grads[j]) + 1e-12
-                        )
-                        for i in range(num_tasks)
-                        for j in range(i + 1, num_tasks)
-                    ]))
+                new_cos_sim  = jnp.array([ # Removed the jnp.mean
+                                jnp.sum(selected_task_grad * task_grads, axis=1) / (
+                                        jnp.linalg.norm(selected_task_grad) * jnp.linalg.norm(task_grads, axis=1) + 1e-12
+                                        )
+                                ])
 
-            # Loop through j's
-            # jax.vmap(inner_loop)
+                return new_cos_sim
 
-        # Loop through i's
-        avg_cos_sim, new_cos_sim = jax.vmap(calc_cos_sim, in_axes=(0, 0, None))(task_grads, final_grads, num_tasks)
+            cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None,None), out_axes=-1)(task_grads, task_grads, num_tasks)
+            mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1) # Get upper triangle
+            masked_cos_sim = mask * cos_sim_mat
+            avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_tasks
+            return avg_cos_sim
+        
+        avg_cos_sim = vmap_cos_sim(task_grads, num_tasks)
+        new_cos_sim = vmap_cos_sim(final_grads, num_tasks)
 
-        breakpoint()
         metrics = {
             "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
             "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),

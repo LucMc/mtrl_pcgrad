@@ -348,6 +348,9 @@ class TestPCGrad:
                         for j in range(i + 1, num_tasks)
                     ]))
 
+            print("LOOPED:")
+            print("avg_cos_sim:\n", avg_cos_sim)
+            print("new_cos_sim:\n", new_cos_sim)
             metrics = {
                 # "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
                 "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
@@ -372,8 +375,18 @@ class TestPCGrad:
             #                     (jnp.linalg.norm(task_gradient) * jnp.linalg.norm(task_grads[j]) + 1e-12)
             #
             #     ])
+            num_tasks = 3
 
-            avg_cos_sim = jnp.array([ # Removed the jnp.mean
+            avg_cos_sim_looped = jnp.mean(
+                    jnp.array([
+                        jnp.sum(task_grads[i] * task_grads[j]) / (
+                            jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
+                        )
+                        for i in range(num_tasks)
+                        for j in range(i + 1, num_tasks)
+                    ]))
+
+            avg_cos_sim_old = jnp.array([ # Removed the jnp.mean
                             jnp.sum(task_grads[i] * task_grads[j]) / (
                                     jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads[j]) + 1e-12
                                     )
@@ -381,29 +394,42 @@ class TestPCGrad:
                             for j in range(i + 1, num_tasks)
                             ])
 
+            acos_test2  = jnp.array([ # Removed the jnp.mean
+                            jnp.sum(task_grads[i] * task_grads, axis=1) / (
+                                    jnp.linalg.norm(task_grads[i]) * jnp.linalg.norm(task_grads, axis=1) + 1e-12
+                                    )
+                            for i in range(num_tasks)
+                            # for j in range(i, num_tasks)
+                            ])#.mean(axis=1)
+
+            mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1) # Get upper triangle
+            new_cs = mask * acos_test2
+            new_mean = jnp.sum(new_cs.flatten()) / num_tasks
+            print("new_mean:\n", new_mean)
+            print("avg_cos_sim_looped\n", avg_cos_sim_looped)
+
+            def vmap_cos_sim(task_grads, num_tasks):
+                def calc_cos_sim(selected_task_grad, task_grads, num_tasks):
+
+                    new_cos_sim  = jnp.array([ # Removed the jnp.mean
+                                    jnp.sum(selected_task_grad * task_grads, axis=1) / (
+                                            jnp.linalg.norm(selected_task_grad) * jnp.linalg.norm(task_grads, axis=1) + 1e-12
+                                            )
+                                    ])
+
+                    return new_cos_sim
+
+                cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None,None), out_axes=-1)(task_grads, task_grads, num_tasks)
+                mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1) # Get upper triangle
+                masked_cos_sim = mask * cos_sim_mat
+                avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_tasks
+                return avg_cos_sim
+            
+            avg_cos_sim = vmap_cos_sim(task_grads, num_tasks)
+            new_cos_sim = vmap_cos_sim(final_grads, num_tasks)
+            print("VMAP:")
             print("avg_cos_sim:\n", avg_cos_sim)
-
-            def calc_cos_sim(task_gradient, compare_gradient, num_tasks):
-
-                new_cos_sim = jnp.array([
-                            jnp.sum(task_gradient * compare_gradient) / (
-                                jnp.linalg.norm(task_gradient) * jnp.linalg.norm(compare_gradient) + 1e-12
-                            )
-                        ])
-
-                avg_cos_sim = jnp.array([None])
-                return avg_cos_sim, new_cos_sim
-
-                # Loop through j's
-                # jax.vmap(inner_loop)
-
-            # Loop through i's
-            with jax.disable_jit():
-                inner_loop = jax.vmap(calc_cos_sim, in_axes=(0, 0, None))
-                outer_loop = jax.vmap(inner_loop, in_axes=(0, 0, None))
-                avg_cos_sim, new_cos_sim = outer_loop(task_grads, task_grads, num_taks) # Should be for every i,j
-                avg_cos_sim, new_cos_sim = outer_loop(task_grads, final_grads, num_taks) # Should be for every i,j
-                breakpoint()
+            print("new_cos_sim:\n", new_cos_sim)
 
             metrics = {
                 # "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
@@ -416,11 +442,10 @@ class TestPCGrad:
 
         num_tasks = 3
         for g, exp_g in testcases():
-            print("\nmetrics_loop:")
-            print(metrics_loop(g, exp_g, num_tasks))
+            ml = metrics_loop(g, exp_g, num_tasks)
 
-            print("\nmetrics_vmap:")
-            print(metrics_vmap(g, exp_g, num_tasks))
+            mv = metrics_vmap(g, exp_g, num_tasks)
+            assert ml == mv
 
 
     '''
