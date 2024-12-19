@@ -408,28 +408,31 @@ class TestPCGrad:
             print("new_mean:\n", new_mean)
             print("avg_cos_sim_looped\n", avg_cos_sim_looped)
 
-            def vmap_cos_sim(task_grads, num_tasks):
-                def calc_cos_sim(selected_task_grad, task_grads, num_tasks):
+            def vmap_cos_sim(grads, num_tasks):
+                def calc_cos_sim(selected_grad, grads):
 
                     new_cos_sim  = jnp.array([ # Removed the jnp.mean
-                                    jnp.sum(selected_task_grad * task_grads, axis=1) / (
-                                            jnp.linalg.norm(selected_task_grad) * jnp.linalg.norm(task_grads, axis=1) + 1e-12
+                                    jnp.sum(selected_grad * grads, axis=1) / (
+                                            jnp.linalg.norm(selected_grad) * jnp.linalg.norm(grads, axis=1) + 1e-12
                                             )
                                     ])
 
                     return new_cos_sim
 
-                cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None,None), out_axes=-1)(task_grads, task_grads, num_tasks)
+                cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0,None), out_axes=-1)(grads, grads)
                 mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1) # Get upper triangle
+                num_unique = jnp.sum(mask)
+    
                 masked_cos_sim = mask * cos_sim_mat
-                avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_tasks
+                avg_cos_sim = jnp.sum(masked_cos_sim.flatten()) / num_unique # n in upper triangle
                 return avg_cos_sim
             
             avg_cos_sim = vmap_cos_sim(task_grads, num_tasks)
             new_cos_sim = vmap_cos_sim(final_grads, num_tasks)
-            print("VMAP:")
-            print("avg_cos_sim:\n", avg_cos_sim)
-            print("new_cos_sim:\n", new_cos_sim)
+            # print("VMAP:")
+            # print("avg_cos_sim:\n", avg_cos_sim)
+            # print("new_cos_sim:\n", new_cos_sim)
+            # breakpoint()
 
             metrics = {
                 # "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
@@ -445,6 +448,7 @@ class TestPCGrad:
             ml = metrics_loop(g, exp_g, num_tasks)
 
             mv = metrics_vmap(g, exp_g, num_tasks)
+            breakpoint()
             assert ml == mv
 
 
