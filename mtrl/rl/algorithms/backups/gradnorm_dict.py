@@ -149,7 +149,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     target_entropy: float = struct.field(pytree_node=False)
     use_task_weights: bool = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
-    # original_losses: Array = struct.field(pytree_node=False)
+    original_losses: Array = struct.field(pytree_node=False)
 
     @override
     @staticmethod
@@ -222,7 +222,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             target_entropy=target_entropy,
             use_task_weights=config.use_task_weights,
             num_critics=config.num_critics,
-            # original_losses=jnp.full((config.num_tasks,), jnp.nan)
+            original_losses={"first_flag": True, "loss0": jnp.zeros((config.num_tasks,))}
         )
 
     @override
@@ -273,7 +273,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
         task_grads, task_losses = jax.vmap(get_task_grad)(jnp.arange(num_tasks))
         '''
         GRADNORM ALGORITHM:
-            - Save original loss [X]
+            - Save original loss
             - Calculate improvement fraction as: (initial loss/loss now) remember div by 0 so add 1e-15 or something
             - Normalise losses by weighting them based on if they're improving too quickly or not quick enough
             - Use parameter alpha to determine how much to weight by
@@ -287,9 +287,9 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
        
         # Should only be nan at the start, could replace this with flag for added robustness
-        # print("original_losses:\n", original_losses)
-        _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
-        # print("original_losses2:\n", original_losses) # TEST THIS IN TEST CLASSES
+        # task_loss_dict = {"first_flag": False, "loss0": task_losses}
+        # keep_original_loss_dict = {"first_flag": False, "loss0": original_losses["loss0"]}
+        # _original_losses = jax.lax.select(original_losses["first_flag"], task_loss_dict, keep_original_loss_dict)
 
         avg_grad = jnp.mean(task_grads, axis=0)
         
@@ -368,7 +368,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 # alpha_val,
                 next_q_value,
                 self.num_tasks,
-                original_losses
+                self.original_losses
             )
             # Always Tracer here
 
@@ -476,9 +476,10 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             actor=actor,
             critic=critic,
             alpha=alpha,
+            original_losses=original_losses
         )
 
-        return (self, {**logs, "losses/actor_loss": actor_loss_value}, original_losses)
+        return (self, {**logs, "losses/actor_loss": actor_loss_value})
 
     @override
     def update(self, data: ReplayBufferSamples, original_losses) -> tuple[Self, LogDict]:
@@ -588,7 +589,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             replay_buffer.load_checkpoint(buffer_checkpoint)
 
         start_time = time.time()
-        original_losses = jnp.full((self.num_tasks,), jnp.nan)
+        original_losses = jnp.array((self.num_tasks,))
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
@@ -640,7 +641,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             if global_step > config.warmstart_steps:
                 # Update the agent with data
                 data = replay_buffer.sample(config.batch_size)
-                self, logs, original_losses = self.update(data, original_losses)
+                self, logs = self.update(data, original_losses)
 
                 # Logging
                 if global_step % 100 == 0:

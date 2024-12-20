@@ -297,11 +297,11 @@ class PCGrad(OffPolicyAlgorithm[PCGradConfig]):
         new_cos_sim = vmap_cos_sim(final_grads, num_tasks)
 
         metrics = {
-            "metrics/pcgrad_n_grad_conflicts": total_grad_conflicts,
-            "metrics/pcgrad_avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
-            "metrics/pcgrad_avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
-            "metrics/pcgrad_avg_cosine_similarity":  avg_cos_sim,
-        "metrics/pcgrad_avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
+            "metrics/n_grad_conflicts": total_grad_conflicts,
+            "metrics/avg_critic_grad_magnitude": jnp.mean(jnp.linalg.norm(final_grads, axis=1)),
+            "metrics/avg_critic_grad_magnitude_before_grad_surgery": jnp.mean(jnp.linalg.norm(task_grads, axis=1)),
+            "metrics/avg_cosine_similarity":  avg_cos_sim,
+        "metrics/avg_cosine_similarity_diff": avg_cos_sim - new_cos_sim
         }       
         return final_grad, metrics
 
