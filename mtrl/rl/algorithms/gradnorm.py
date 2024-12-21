@@ -279,23 +279,35 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             - Use parameter alpha to determine how much to weight by
             - Change fixed alpha to being an actual hyperparameter, maybe choose a different letter?
 
-            \tilde{L}_i(t) / L_i(0) # Loss ratio, aka inverse training rate
+            \tilde{L}_i(t) = L_i(t) / L_i(0) # Loss ratio, aka inverse training rate
             r_i(t) = \tilde{L}_i(t) / E_{task}[\tilde{L}_i(t)] # The *relative* inverse training rate
             ... Define G (task grad) and \bar{G} (avg grad) similarly
 
         '''
+        def compute_gradnorm(alpha=0.1):
+            _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
 
-       
-        # Should only be nan at the start, could replace this with flag for added robustness
-        # print("original_losses:\n", original_losses)
-        _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
-        # print("original_losses2:\n", original_losses) # TEST THIS IN TEST CLASSES
+            def loss_fn(params):
+                # Should only be nan at the start, could replace this with flag for added robustness
+                improvement = _original_losses / (task_losses + 1e-12) # \tilde{L}_i(t)
 
-        avg_grad = jnp.mean(task_grads, axis=0)
-        
+                grad_norms = jnp.linalg.norm(task_grads, axis=1)  # G_W
+                avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t)
+                avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)]
+
+                rit = improvement / avg_impr
+                gn_loss = jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
+                return gn_loss
+
+            loss, grad = jax.value_and_grad(loss_fn)(critic.params)
+            return loss, grad, _original_losses
+
+        loss, grad, _original_losses = compute_gradnorm(alpha=0.1)
+
         # Unravel back to pytree
-        _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
-        final_grad = unravel_fn(avg_grad)
+        # _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
+        # final_grad = unravel_fn(grad)
+        final_grad = grad
             
         # Metrics 
         def vmap_cos_sim(grads, num_tasks):
@@ -640,7 +652,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             if global_step > config.warmstart_steps:
                 # Update the agent with data
                 data = replay_buffer.sample(config.batch_size)
-                self, logs, original_losses = self.update(data, original_losses)
+                with jax.disable_jit():
+                    self, logs, original_losses = self.update(data, original_losses)
 
                 # Logging
                 if global_step % 100 == 0:
