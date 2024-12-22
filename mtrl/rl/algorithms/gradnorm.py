@@ -17,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import struct
-from flax.core import FrozenDict
+from flax.core import FrozenDict, freeze, unfreeze
 from flax.training.train_state import TrainState
 from jaxtyping import Array, Float, PRNGKeyArray
 
@@ -243,6 +243,16 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     def eval_action(self, observation: Observation) -> tuple[Action, AuxPolicyOutputs]:
         return jax.device_get(_eval_action(self.actor, observation)), {}
 
+    @staticmethod
+    @jax.jit
+    def renormalise_weights(net: TrainState, num_tasks: int): # general but mainly used for critic
+        weights, unravel_fn = jax.flatten_util.ravel_pytree(net.params)
+
+        # We want weights for each task to avg to 1 so total weights should equal num tasks w(i+1) = Tw(i)/sum{W(i)}
+        new_params = unravel_fn( (weights / (jnp.sum(weights) + 1e-12) ) * num_tasks)
+        train_state = train_state.replace(params=new_params)
+        return train_state
+
 
     @staticmethod
     @partial(jax.jit, static_argnums=(4,))  # Specify the index of num_tasks argument
@@ -289,25 +299,26 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
             def loss_fn(params):
                 # Should only be nan at the start, could replace this with flag for added robustness
-                improvement = _original_losses / (task_losses + 1e-12) # \tilde{L}_i(t)
+                start = time.time()
+                improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)
 
                 grad_norms = jnp.linalg.norm(task_grads, axis=1)  # G_W
                 avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t)
                 avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)]
 
                 rit = improvement / avg_impr
-                gn_loss = jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
+                gn_loss = jnp.sum(jnp.abs(grad_norms - avg_grad_norm * (rit)**alpha))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
                 return gn_loss
 
             loss, grad = jax.value_and_grad(loss_fn)(critic.params)
             return loss, grad, _original_losses
 
-        loss, grad, _original_losses = compute_gradnorm(alpha=0.1)
+        loss, final_grad, _original_losses = compute_gradnorm(alpha=0.1)
 
         # Unravel back to pytree
         # _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
         # final_grad = unravel_fn(grad)
-        final_grad = grad
+        # final_grad = grad
             
         # Metrics 
         def vmap_cos_sim(grads, num_tasks):
@@ -385,6 +396,9 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             # Always Tracer here
 
             _critic = _critic.apply_gradients(grads=critic_grads)
+            # _critic = unfreeze
+            _critic = GradNorm.renormalise_weights(_critic, self.num_tasks)
+            # uf_critic = unfreeze(_critic.params)['params'] = new_params['params']
             
             # For metrics - TODO: Improve performance
             q_pred = _critic.apply_fn(_critic.params, data.observations, data.actions)
