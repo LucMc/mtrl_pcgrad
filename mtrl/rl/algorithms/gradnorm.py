@@ -245,8 +245,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
     @staticmethod
     @jax.jit
-    def renormalise_weights(net: TrainState, num_tasks: int): # general but mainly used for critic
-        weights, unravel_fn = jax.flatten_util.ravel_pytree(net.params)
+    def renormalise_weights(train_state: TrainState, num_tasks: int): # general but mainly used for critic
+        weights, unravel_fn = jax.flatten_util.ravel_pytree(train_state.params)
 
         # We want weights for each task to avg to 1 so total weights should equal num tasks w(i+1) = Tw(i)/sum{W(i)}
         new_params = unravel_fn( (weights / (jnp.sum(weights) + 1e-12) ) * num_tasks)
