@@ -396,10 +396,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             # Always Tracer here
 
             _critic = _critic.apply_gradients(grads=critic_grads)
-            # _critic = unfreeze
-            _critic = GradNorm.renormalise_weights(_critic, self.num_tasks)
-            # uf_critic = unfreeze(_critic.params)['params'] = new_params['params']
-            
+            # Meant to normalise task weights but we don't have task specific weights
+            # _critic = GradNorm.renormalise_weights(_critic, self.num_tasks)             
             # For metrics - TODO: Improve performance
             q_pred = _critic.apply_fn(_critic.params, data.observations, data.actions)
             qf_loss = 0.5 * ((q_pred - next_q_value) ** 2).mean()
