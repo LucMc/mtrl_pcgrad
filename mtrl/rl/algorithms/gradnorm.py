@@ -246,7 +246,12 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     @staticmethod
     @jax.jit
     def renormalise_weights(train_state: TrainState, num_tasks: int): # general but mainly used for critic
-        weights, unravel_fn = jax.flatten_util.ravel_pytree(train_state.params)
+        '''The original paper renormalises the weights of gradnormed layer'''
+        last_layer_name = train_state.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"].keys()[-1]
+        last_layer = _critic.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"][last_layer_name]
+        weights, unravel_fn = jax.flatten_util.ravel_pytree(last_layer)
+        uf_ll = unfreeze(weights)[last_layer_name]
+        # uf_ll[last_layer_name] = 
 
         # We want weights for each task to avg to 1 so total weights should equal num tasks w(i+1) = Tw(i)/sum{W(i)}
         new_params = unravel_fn( (weights / (jnp.sum(weights) + 1e-12) ) * num_tasks)
@@ -294,26 +299,28 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             ... Define G (task grad) and \bar{G} (avg grad) similarly
 
         '''
+        @jax.jit
         def compute_gradnorm(alpha=0.1):
+            # Should only be nan at the start, could replace this with flag for added robustness
             _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
 
             def loss_fn(params):
-                # Should only be nan at the start, could replace this with flag for added robustness
-                start = time.time()
                 improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)
 
-                grad_norms = jnp.linalg.norm(task_grads, axis=1)  # G_W
+                grad_norms = jnp.linalg.norm(task_grads, axis=1, ord=1)  # G_W
                 avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t)
                 avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)]
 
                 rit = improvement / avg_impr
-                gn_loss = jnp.sum(jnp.abs(grad_norms - avg_grad_norm * (rit)**alpha))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
+                gn_loss = jnp.sum(jnp.abs(grad_norms - (avg_grad_norm * (rit)**alpha)))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
                 return gn_loss
 
             loss, grad = jax.value_and_grad(loss_fn)(critic.params)
             return loss, grad, _original_losses
-
+        
         loss, final_grad, _original_losses = compute_gradnorm(alpha=0.1)
+        print(loss, _original_losses.mean())
+        
 
         # Unravel back to pytree
         # _, unravel_fn = jax.flatten_util.ravel_pytree(critic.params)
@@ -396,10 +403,11 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             # Always Tracer here
 
             _critic = _critic.apply_gradients(grads=critic_grads)
+            
             # Meant to normalise task weights but we don't have task specific weights
             # _critic = GradNorm.renormalise_weights(_critic, self.num_tasks)             
-            # For metrics - TODO: Improve performance
             q_pred = _critic.apply_fn(_critic.params, data.observations, data.actions)
+
             qf_loss = 0.5 * ((q_pred - next_q_value) ** 2).mean()
             
             return _critic , {
