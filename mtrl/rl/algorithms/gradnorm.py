@@ -319,7 +319,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             return loss, grad, _original_losses
         
         loss, final_grad, _original_losses = compute_gradnorm(alpha=0.1)
-        print(loss, _original_losses.mean())
+        # print(loss, _original_losses.mean())
         
 
         # Unravel back to pytree
