@@ -243,20 +243,20 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     def eval_action(self, observation: Observation) -> tuple[Action, AuxPolicyOutputs]:
         return jax.device_get(_eval_action(self.actor, observation)), {}
 
-    @staticmethod
-    @jax.jit
-    def renormalise_weights(train_state: TrainState, num_tasks: int): # general but mainly used for critic
-        '''The original paper renormalises the weights of gradnormed layer'''
-        last_layer_name = train_state.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"].keys()[-1]
-        last_layer = _critic.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"][last_layer_name]
-        weights, unravel_fn = jax.flatten_util.ravel_pytree(last_layer)
-        uf_ll = unfreeze(weights)[last_layer_name]
-        # uf_ll[last_layer_name] = 
-
-        # We want weights for each task to avg to 1 so total weights should equal num tasks w(i+1) = Tw(i)/sum{W(i)}
-        new_params = unravel_fn( (weights / (jnp.sum(weights) + 1e-12) ) * num_tasks)
-        train_state = train_state.replace(params=new_params)
-        return train_state
+    # @staticmethod
+    # @jax.jit
+    # def renormalise_weights(train_state: TrainState, num_tasks: int): # general but mainly used for critic
+    #     '''The original paper renormalises the weights of gradnormed layer'''
+    #     last_layer_name = train_state.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"].keys()[-1]
+    #     last_layer = _critic.params["params"]["VmapQValueFunction_0"]["MultiHeadNetwork_0"][last_layer_name]
+    #     weights, unravel_fn = jax.flatten_util.ravel_pytree(last_layer)
+    #     uf_ll = unfreeze(weights)[last_layer_name]
+    #     # uf_ll[last_layer_name] = 
+    #
+    #     # We want weights for each task to avg to 1 so total weights should equal num tasks w(i+1) = Tw(i)/sum{W(i)}
+    #     new_params = unravel_fn( (weights / (jnp.sum(weights) + 1e-12) ) * num_tasks)
+    #     train_state = train_state.replace(params=new_params)
+    #     return train_state
 
 
     @staticmethod
@@ -298,6 +298,26 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             r_i(t) = \tilde{L}_i(t) / E_{task}[\tilde{L}_i(t)] # The *relative* inverse training rate
             ... Define G (task grad) and \bar{G} (avg grad) similarly
 
+        Initialize $w_i(0)=1 \forall i$
+        Initialize network weights $\mathcal{W}$
+        Pick value for $\alpha>0$ and pick the weights $W$ (usually the
+            final layer of weights which are shared between tasks)
+        for $t=0$ to max_train_steps $^{-10}$
+            Input batch $x_i$ to compute $L_i(t) \forall i$ and
+                $L(t)=\sum_i w_i(t) L_i(t)$ [standard forward pass]
+            Compute $G_W^{(i)}(t)$ and $r_i(t) \forall i$
+            Compute $\bar{G}_W(t)$ by averaging the $G_W^{(i)}(t)$
+            Compute $L_{\text {grad }}=\sum_i\left|G_W^{(i)}(t)-\bar{G}_W(t) \times\left[r_i(t)\right]^\alpha\right|_1$
+            Compute GradNorm gradients $\nabla_{w_i} L_{\text {grad }}$, keeping
+                targets $\bar{G}_W(t) \times\left[r_i(t)\right]^\alpha$ constant
+            Compute standard gradients $\nabla_{\mathcal{W}} L(t)$
+            Update $w_i(t) \mapsto w_i(t+1)$ using $\nabla_{w_i} L_{\text {grad }}$
+            Update $\mathcal{W}(t) \mapsto \mathcal{W}(t+1)$ using $\nabla_{\mathcal{W}} L(t)$ [standard
+                backward pass]
+            Renormalize $w_i(t+1)$ so that $\sum_i w_i(t+1)=T$
+        end for
+        ```
+
         '''
         @jax.jit
         def compute_gradnorm(alpha=0.1):
@@ -312,13 +332,14 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)]
 
                 rit = improvement / avg_impr
-                gn_loss = jnp.sum(jnp.abs(grad_norms - (avg_grad_norm * (rit)**alpha)))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
-                return gn_loss
+                l_grad = jnp.sum(jnp.linalg.norm(grad_norms - jax.lax.stop_gradient(avg_grad_norm * (rit)**alpha), ord=1))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
+                return l_grad
 
             loss, grad = jax.value_and_grad(loss_fn)(critic.params)
             return loss, grad, _original_losses
         
-        loss, final_grad, _original_losses = compute_gradnorm(alpha=0.1)
+        loss, final_grad, _original_losses = compute_gradnorm(alpha=0.)
+        print(loss)
         # print(loss, _original_losses.mean())
         
 
@@ -738,3 +759,5 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                             metrics=eval_metrics,
                         )
         return self
+
+
