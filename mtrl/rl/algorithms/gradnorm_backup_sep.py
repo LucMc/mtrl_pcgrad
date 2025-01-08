@@ -414,32 +414,17 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
         def update_critic(
             _critic: CriticTrainState,
             alpha_val: Float[Array, "batch 1"],
-            # task_weights: Float[Array, "batch 1"] | None = None,
-            gn_state: TrainState,
-            num_tasks,
-            task_ids
+            task_weights: Float[Array, "batch 1"] | None = None,
         ) -> tuple[CriticTrainState, LogDict]:
-
             # Sample a'
             next_actions, next_action_log_probs = self.actor.apply_fn(
                 self.actor.params, data.next_observations
             ).sample_and_log_prob(seed=critic_loss_key)
-
-            if self.use_task_weights:
-                task_weights = extract_task_weights(gn_state.params, task_ids)
-            else:
-                task_weights = None
-
             # Compute target Q values
             q_values = self.critic.apply_fn(
                 self.critic.target_params, data.next_observations, next_actions
             )
-            min_qf_next_target = jnp.min(
-                q_values, axis=0
-            ) - alpha_val * next_action_log_probs.reshape(-1, 1)
-            next_q_value = jax.lax.stop_gradient(
-                data.rewards + (1 - data.dones) * self.gamma * min_qf_next_target
-            )
+
             def critic_loss(
                 params: FrozenDict,
             ) -> tuple[Float[Array, ""], Float[Array, ""]]:
@@ -452,6 +437,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 )
 
                 q_pred = self.critic.apply_fn(params, data.observations, data.actions)
+
                 if self.use_task_weights:
                     assert task_weights is not None
                     loss = (
@@ -460,6 +446,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                         .mean(axis=1)
                         .sum()
                     )
+                    breakpoint() # Check we are infact using the weights
                 else:
                     loss = 0.5 * ((q_pred - next_q_value) ** 2).mean(axis=1).sum()
                 return loss, q_pred.mean()
@@ -469,20 +456,11 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             )(_critic.params)
             _critic = _critic.apply_gradients(grads=critic_grads)
             flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
-
-            ####
-            _gn_state, task_weights, _original_losses, gn_metrics = update_gn_weights(gn_state,
-                                                                          original_losses,
-                                                                          _critic,
-                                                                          num_tasks,
-                                                                          task_ids, 
-                                                                          next_q_value)
-            ####
             return _critic, {
                 "losses/qf_values": qf_values,
                 "losses/qf_loss": critic_loss_value,
                 "metrics/critic_grad_magnitude": jnp.linalg.norm(flat_grads),
-            } | gn_metrics, _gn_state, task_weights, _original_losses
+            }
 
         # --- Alpha loss ---
 
@@ -514,27 +492,13 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 },
             )
 
-        def update_gn_weights(gn_state, original_losses, critic, num_tasks, task_ids, next_q_value, alpha=0.5):
-
-            # Extract normalised task weights from params
-            # if self.use_task_weights:
-            #     task_weights = extract_task_weights(gn_state.params, task_ids)
-            # else:
-            #     task_weights = None
-
-            # Get grads and loss for each task
-            def get_task_grad(task_idx: int, task_weights: Array) -> Array:
+        def update_gn_weights(gn_state, original_losses, critic, num_tasks, task_ids):
+            def get_task_grad(task_idx: int) -> Array:
                 task_mask = task_ids[:, task_idx] == 1
                 
                 def task_loss(params: FrozenDict) -> Float[Array, ""]:
                     q_pred = critic.apply_fn(params, data.observations, data.actions)
-                    # loss = 0.5 * ((q_pred - next_q_value) ** 2 * task_mask.flatten()[:, None]).mean()
-                    loss = (
-                        0.5
-                        * (task_weights * (q_pred - next_q_value) ** 2)
-                        .mean(axis=1)
-                        .sum()
-                    )
+                    loss = 0.5 * ((q_pred - next_q_value) ** 2 * task_mask[:, None]).mean()
                     return loss
                 
                 # Get gradients for each task using vmap
@@ -542,39 +506,21 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 flat_grad, _ = jax.flatten_util.ravel_pytree(grad)
                 return flat_grad, loss
 
-            # task_grads, task_losses = jax.vmap(get_task_grad)(jnp.arange(num_tasks).reshape(-1,1))
-            # _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
+            task_grads, task_losses = jax.vmap(get_task_grad)(jnp.arange(num_tasks).reshape(-1,1))
 
+            if self.use_task_weights:
+                task_weights = extract_task_weights(gn_state.params, task_ids)
+            else:
+                task_weights = None
 
             def gn_loss(params): # Could also try original losses
-                task_weights = extract_task_weights(params, task_ids)
-                task_grads, task_losses = jax.vmap(get_task_grad, in_axes=(0,None))(jnp.arange(num_tasks).reshape(-1,1), task_weights)
-                _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), task_losses, original_losses)
-                improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)
-                avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)] Scalar
-                rit = improvement / avg_impr
-                grad_norms = jnp.linalg.norm(task_grads, axis=1, ord=2)  # G_W (num_tasks, params) -> (grad_norms,)
-                avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t) Scalar
-                constant = avg_grad_norm * rit ** alpha
-                l_grad = jnp.sum(jnp.abs(grad_norms - constant))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
-                return l_grad, (_original_losses, task_weights)
+                return jnp.square(params["params"]["gn_weights"].sum())
 
-            # def gn_loss(params): # Dummy loss for now
+            loss, grads = jax.value_and_grad(gn_loss)(gn_state.params)
+            print(task_weights, loss, gn_state.params["params"]["gn_weights"])
+            gn_state = gn_state.apply_gradients(grads=grads)
 
-            (loss, (_original_losses, task_weights)), grads = jax.value_and_grad(gn_loss, has_aux=True)(gn_state.params)
-            # breakpoint()
-            _gn_state = gn_state.apply_gradients(grads=grads)
-
-            # print("grads:\n", grads)
-            # # print(task_weights, loss, gn_state.params["params"]["gn_weights"])
-            # print("gn_state params:\n", gn_state.params["params"]["gn_weights"])
-            # print("loss:\n", loss)
-
-            # print("task_weights:\n", task_weights)
-            # print("std: ", jnp.std(task_weights))
-
-            return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
-                                                               'metrics/gradnorm_loss': loss}
+            return gn_state, task_weights, original_losses
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict, task_weights: FrozenDict):
@@ -589,25 +535,21 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             )
 
             # Only update if using task weights, otherwise should default to mtmhsac
-            # if self.use_task_weights:
-            #     _gn_state, task_weights, _original_losses = update_gn_weights(self.gn_state,
-            #                                                                   original_losses,
-            #                                                                   self.critic,
-            #                                                                   self.num_tasks,
-            #                                                                   jnp.array(task_ids))
-            # else:
-            #     task_weights = None
-            #     _original_losses = original_losses
-            #     _gn_state = self.gn_state
+            if self.use_task_weights:
+                _gn_state, task_weights, _original_losses = update_gn_weights(self.gn_state,
+                                                                              original_losses,
+                                                                              self.critic,
+                                                                              self.num_tasks,
+                                                                              jnp.array(task_ids))
+            else:
+                task_weights = None
+                _original_losses = original_losses
+                _gn_state = self.gn_state
 
             _alpha_val = jax.lax.stop_gradient(_alpha_val)
             if task_weights is not None:
                 task_weights = jax.lax.stop_gradient(task_weights)
-            _critic, critic_logs, _gn_state, task_weights, _original_losses = update_critic(self.critic,
-                                             _alpha_val,
-                                             self.gn_state,
-                                             self.num_tasks,
-                                             jnp.array(task_ids))
+            _critic, critic_logs = update_critic(self.critic, _alpha_val, task_weights)
             logs = {**alpha_logs, **critic_logs}
 
             q_values = _critic.apply_fn(
@@ -621,7 +563,6 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 ).mean()
             else:
                 loss = (_alpha_val * log_probs.reshape(-1, 1) - min_qf_values).mean()
-            
             return loss, (_alpha, _critic, logs, _original_losses, _gn_state)
 
         (actor_loss_value, (alpha, critic, logs, original_losses, gn_state)), actor_grads = jax.value_and_grad(
@@ -766,6 +707,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
         start_time = time.time()
         original_losses = jnp.full((self.num_tasks,), jnp.nan)
+        breakpoint()
         ### Handle trainstate here?
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
@@ -884,6 +826,5 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                             metrics=eval_metrics,
                         )
         return self
-
 
 

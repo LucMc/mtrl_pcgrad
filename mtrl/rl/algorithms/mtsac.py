@@ -253,7 +253,6 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             (critic_loss_value, qf_values), critic_grads = jax.value_and_grad(
                 critic_loss, has_aux=True
             )(_critic.params)
-            
             _critic = _critic.apply_gradients(grads=critic_grads)
             flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
             return _critic, {

@@ -48,13 +48,12 @@ def main() -> None:
                 )
             ),
             num_critics=2,
-            use_task_weights=True,
+            use_task_weights=True, # Task weights are handled differently in GradNorm
         ),
         training_config=OffPolicyTrainingConfig(
             total_steps=int(2e7),
             buffer_size=int(1e6),
             batch_size=1280,
-            warmstart_steps=1000
         ),
         checkpoint=True,
         resume=False,

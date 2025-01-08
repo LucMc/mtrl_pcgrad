@@ -12,7 +12,7 @@ from functools import partial
 
 from mtrl.envs.base import EnvConfig
 from mtrl.rl.algorithms.mtsac import MTSACConfig, MTSAC
-from mtrl.rl.algorithms.gradnorm import GradNormConfig, GradNorm
+from mtrl.rl.algorithms.gradnorm import GradNormConfig, GradNorm, GradNormWeights
 
 from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
 
@@ -23,6 +23,7 @@ from mtrl.envs import MetaworldConfig
 from mtrl.experiment import Experiment
 
 from pprint import pprint
+import flax.linen as nn
 
 from mtrl.rl.algorithms import (
     Algorithm,
@@ -66,7 +67,9 @@ class TestGradNorm:
                 )
             ),
             num_critics=2,
-            use_task_weights=True,
+            use_task_weights=True, # Turn on when I've updated the task weights update blank pass thru
+            gn_optimizer_config=OptimizerConfig(lr=1e-2) # Just for testing
+            
         )
         env = MetaworldConfig(
             env_id="MT10",
@@ -93,7 +96,7 @@ class TestGradNorm:
                 )
             ),
             num_critics=2,
-            use_task_weights=True,
+            use_task_weights=False,
         )
         env.spawn(seed=SEED)
         MTSAC_cls = get_algorithm_for_config(algorithm_conf)
@@ -134,7 +137,7 @@ class TestGradNorm:
         episodes_ended = 0
         
         # Envs have autoresetting
-        for ts in range(10_000):
+        for ts in range(20_000):
             actions = env.action_space.sample()
             next_obs, rewards, terminations, truncations, infos = env.step(actions)
 
@@ -155,10 +158,27 @@ class TestGradNorm:
         # print("episodes_ended:\n", episodes_ended)
 
         
-        # train MTMH on that experience
-        for epoch in range(30):
+        original_losses = jnp.full((gradnorm_cls.num_tasks,), jnp.nan)
+        task_layer = GradNormWeights(gradnorm_cls.num_tasks)
+        # task_layer = nn.Dense(features=gradnorm_cls.num_tasks, use_bias=False)
+        task_weights = task_layer.init(gradnorm_cls.key, jnp.ones(gradnorm_cls.num_tasks))
+
+        # train GradNormSAC on that experience
+        print("GradNorm")
+        for epoch in range(40):
             data = replay_buffer.sample(config.batch_size)
-            MTSAC_cls, logs = MTSAC_cls.update(data)
-            print(f"{epoch} epoch - qf loss: {logs["losses/qf_loss"]}")
+            
+            # uncomment for debugging
+            with jax.disable_jit(): gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses, task_weights)
+            # gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses, task_weights)
+
+            print(f"{epoch} GN epoch - qf loss: {logs["losses/qf_loss"]}")
+
+        # train MTMH on that experience
+        # print("MTMHSAC")
+        # for epoch in range(30):
+        #     data = replay_buffer.sample(config.batch_size)
+        #     MTSAC_cls, logs = MTSAC_cls.update(data)
+        #     print(f"{epoch} SAC epoch - qf loss: {logs["losses/qf_loss"]}")
 
 
