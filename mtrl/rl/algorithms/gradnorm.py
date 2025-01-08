@@ -405,7 +405,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
 
     @jax.jit
-    def _update_inner(self, data: ReplayBufferSamples, original_losses, task_weights) -> tuple[Self, LogDict]:
+    def _update_inner(self, data: ReplayBufferSamples, original_losses) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
         
         # --- Critic loss ---
@@ -577,7 +577,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                                                                'metrics/gradnorm_loss': loss}
 
         # --- Actor loss --- & calls for the other losses
-        def actor_loss(params: FrozenDict, task_weights: FrozenDict):
+        def actor_loss(params: FrozenDict):
             action_samples, log_probs = self.actor.apply_fn(
                 params, data.observations
             ).sample_and_log_prob(seed=actor_loss_key)
@@ -601,8 +601,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             #     _gn_state = self.gn_state
 
             _alpha_val = jax.lax.stop_gradient(_alpha_val)
-            if task_weights is not None:
-                task_weights = jax.lax.stop_gradient(task_weights)
+            # if task_weights is not None:
+            #     task_weights = jax.lax.stop_gradient(task_weights)
             _critic, critic_logs, _gn_state, task_weights, _original_losses = update_critic(self.critic,
                                              _alpha_val,
                                              self.gn_state,
@@ -626,7 +626,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
         (actor_loss_value, (alpha, critic, logs, original_losses, gn_state)), actor_grads = jax.value_and_grad(
             actor_loss, has_aux=True
-        )(self.actor.params, task_weights)
+        )(self.actor.params)
         actor = self.actor.apply_gradients(grads=actor_grads)
 
         flat_grads, _ = flatten_util.ravel_pytree(actor_grads)
@@ -658,8 +658,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
         return (self, {**logs, "losses/actor_loss": actor_loss_value}, original_losses)
 
     @override
-    def update(self, data: ReplayBufferSamples, original_losses, task_weights) -> tuple[Self, LogDict]:
-        return self._update_inner(data, original_losses, task_weights)
+    def update(self, data: ReplayBufferSamples, original_losses) -> tuple[Self, LogDict]:
+        return self._update_inner(data, original_losses)
 
     def _split_critic_activations(
         self, critic_acts: LayerActivationsDict
@@ -819,7 +819,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 # Update the agent with data
                 data = replay_buffer.sample(config.batch_size)
                 with jax.disable_jit():
-                    self, logs, original_losses = self.update(data, original_losses, task_weights)
+                    self, logs, original_losses = self.update(data, original_losses)
 
                 # Logging
                 if global_step % 100 == 0:
