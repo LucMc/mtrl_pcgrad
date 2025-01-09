@@ -148,14 +148,14 @@ class TestGradNorm:
     3. Test the grads of a task doing better are lower
     4. Anything else...
     '''
-    def test_gradnorm(self):
+
+    def overfit_alg(self, alg_cls):
         config = OffPolicyTrainingConfig(
                 total_steps=int(2e7),
                 buffer_size=int(1e6),
                 batch_size=1280,
                 warmstart_steps=1000
                 )
-        MTASC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=2)
         # Just overfit MTSAC/GradNorm on some experience to see loss decrease
 
         replay_buffer = self.gen_experience(gradnorm_cls, config)
@@ -185,5 +185,10 @@ class TestGradNorm:
         #     data = replay_buffer.sample(config.batch_size)
         #     MTSAC_cls, logs = MTSAC_cls.update(data)
         #     print(f"{epoch} SAC epoch - qf loss: {logs["losses/qf_loss"]}")
+
+
+    def test_GN_is_MTSAC(self):
+        MTSAC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=2)
+        self.overfit_alg(gradnorm_cls)
 
 
