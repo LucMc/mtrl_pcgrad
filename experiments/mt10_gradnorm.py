@@ -32,6 +32,7 @@ def main() -> None:
         env=MetaworldConfig(
             env_id="MT10",
             terminate_on_success=False,
+            reward_func_version='v1'
         ),
         algorithm=GradNormConfig(
             num_tasks=10,
