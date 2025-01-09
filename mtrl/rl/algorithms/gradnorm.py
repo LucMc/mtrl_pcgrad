@@ -73,6 +73,7 @@ from mtrl.types import (
     Rollout,
     Value,
 )
+
 AlgorithmConfigType = TypeVar("AlgorithmConfigType", bound=AlgorithmConfig)
 TrainingConfigType = TypeVar("TrainingConfigType", bound=TrainingConfig)
 DataType = TypeVar("DataType", ReplayBufferSamples, Rollout)
@@ -467,7 +468,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss,
-                                                               'metrics/asymmetry_const': asymmetry}
+                                                               'metrics/asymmetry_const': asymmetry,
+                                                               'metrics/gn_weights': task_weights}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
@@ -613,7 +615,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             )
             for key, value in acts.items():
                 metrics[f"metrics/srank_critic_{i}_{key}"] = compute_srank(value)
-
+            
         return self, metrics
     
     @override
@@ -700,6 +702,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 # Update the agent with data
                 data = replay_buffer.sample(config.batch_size)
                 self, logs, original_losses = self.update(data, original_losses)
+
+                logs["metrics/gn_weights"] = wandb.Histogram(logs["metrics/gn_weights"])
 
                 # Logging
                 if global_step % 100 == 0:
