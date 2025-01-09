@@ -1,3 +1,4 @@
+from doctest import debug
 from typing import final
 from numpy.random import permutation
 import time
@@ -100,10 +101,10 @@ class TestGradNorm:
             use_task_weights=False,
         )
         env.spawn(seed=SEED)
-        MTSAC_cls = get_algorithm_for_config(algorithm_conf)
-        MTSAC_cls = MTSAC_cls.initialize(algorithm_conf, env, seed=SEED)
+        mtsac_cls = get_algorithm_for_config(algorithm_conf)
+        mtsac_cls = mtsac_cls.initialize(algorithm_conf, env, seed=SEED)
 
-        return MTSAC_cls, gradnorm_cls
+        return mtsac_cls, gradnorm_cls
     
 
     def gen_experience(self, alg_cls, config):
@@ -149,7 +150,8 @@ class TestGradNorm:
     4. Anything else...
     '''
 
-    def overfit_alg(self, alg_cls):
+    def overfit_alg(self, asymmetry, debug=True, epochs=30):
+        mtsac_cls, gradnorm_cls = self.get_alg_cls(asymmetry=asymmetry)
         config = OffPolicyTrainingConfig(
                 total_steps=int(2e7),
                 buffer_size=int(1e6),
@@ -166,29 +168,41 @@ class TestGradNorm:
 
         # train GradNormSAC on that experience
         # test_critic_uses_weights()
-        losses = []
+        gn_losses = []
 
         print("GradNorm overfitting to experience test")
         print("asymmetry:\n", gradnorm_cls.asymmetry)
-        for epoch in range(30):
+        for epoch in range(epochs):
             data = replay_buffer.sample(config.batch_size)
             
             # uncomment for debugging
-            with jax.disable_jit(): gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
-            # gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
-            losses.append(logs["losses/qf_loss"])
+            gradnorm_cls.gn_state.params['params']['gn_weights'] = jnp.ones(gradnorm_cls.num_tasks)
+            if debug:
+                with jax.disable_jit(): gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
+            else:
+                gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
+
+            gn_losses.append(logs["losses/qf_loss"])
             print(f"{epoch} GN epoch - qf loss: {logs["losses/qf_loss"]}")
 
         # train MTMH on that experience
-        # print("MTMHSAC")
-        # for epoch in range(30):
-        #     data = replay_buffer.sample(config.batch_size)
-        #     MTSAC_cls, logs = MTSAC_cls.update(data)
-        #     print(f"{epoch} SAC epoch - qf loss: {logs["losses/qf_loss"]}")
+        sac_losses = []
+        print("MTMHSAC")
+        for epoch in range(epochs):
+            data = replay_buffer.sample(config.batch_size)
+            mtsac_cls, logs = mtsac_cls.update(data)
+            print(f"{epoch} SAC epoch - qf loss: {logs["losses/qf_loss"]}")
+            sac_losses.append(logs["losses/qf_loss"])
+
+        return sac_losses, gn_losses
 
 
-    def test_GN_is_MTSAC(self):
-        MTSAC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=2)
-        self.overfit_alg(gradnorm_cls)
+    def test_overfit(self):
+        sac_losses1, gn_losses1 = self.overfit_alg(asymmetry=0, debug=False, epochs=5)
+        sac_losses2, gn_losses2 = self.overfit_alg(asymmetry=0, debug=False, epochs=5)
+
+        # Check seeding works
+        assert sac_losses1 == sac_losses2
+        assert gn_losses1 == gn_losses2
 
 
