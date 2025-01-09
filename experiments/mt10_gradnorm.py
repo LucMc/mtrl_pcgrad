@@ -36,6 +36,7 @@ def main() -> None:
         algorithm=GradNormConfig(
             num_tasks=10,
             gamma=0.99,
+            asymmetry=0.12, # Default from paper (called alpha)
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     num_tasks=10, optimizer=OptimizerConfig(max_grad_norm=1.0)
@@ -49,6 +50,7 @@ def main() -> None:
             ),
             num_critics=2,
             use_task_weights=True, # Task weights are handled differently in GradNorm
+            gn_optimizer_config = OptimizerConfig(max_grad_norm=1.0),
         ),
         training_config=OffPolicyTrainingConfig(
             total_steps=int(2e7),
