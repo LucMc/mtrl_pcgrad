@@ -153,6 +153,7 @@ class GradNormConfig(AlgorithmConfig):
     initial_temperature: float = 1.0
     num_critics: int = 2
     tau: float = 0.005
+    asymmetry: float = 0.12 # Called alpha in paper
     use_task_weights: bool = True
 
 
@@ -167,6 +168,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     target_entropy: float = struct.field(pytree_node=False)
     use_task_weights: bool = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
+    asymmetry: float = struct.field(pytree_node=False)
     # original_losses: Array = struct.field(pytree_node=False)
 
     @override
@@ -247,6 +249,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             target_entropy=target_entropy,
             use_task_weights=config.use_task_weights,
             num_critics=config.num_critics,
+            asymmetry=config.asymmetry
             # original_losses=jnp.full((config.num_tasks,), jnp.nan)
         )
 
@@ -336,7 +339,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                     assert task_weights is not None
                     loss = (
                         0.5
-                        * (task_weights * (q_pred - next_q_value) ** 2)
+                        * (jax.lax.stop_gradient(task_weights) * (q_pred - next_q_value) ** 2)
                         .mean(axis=1)
                         .sum()
                     )
@@ -350,14 +353,15 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             _critic = _critic.apply_gradients(grads=critic_grads)
             flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
 
-            ####
+            # --- GradNorm Weight Update ---
             _gn_state, task_weights, _original_losses, gn_metrics = update_gn_weights(gn_state,
                                                                           original_losses,
                                                                           _critic,
                                                                           num_tasks,
                                                                           task_ids, 
-                                                                          next_q_value)
-            ####
+                                                                          next_q_value,
+                                                                          self.asymmetry)
+            
             return _critic, {
                 "losses/qf_values": qf_values,
                 "losses/qf_loss": critic_loss_value,
@@ -393,14 +397,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                     "alpha": jnp.exp(_alpha.params["params"]["log_alpha"]).sum(),  # pyright: ignore [reportReturnType,reportArgumentType]
                 },
             )
-
-        def update_gn_weights(gn_state, original_losses, critic, num_tasks, task_ids, next_q_value, alpha=0.5):
-
-            # Extract normalised task weights from params
-            # if self.use_task_weights:
-            #     task_weights = extract_task_weights(gn_state.params, task_ids)
-            # else:
-            #     task_weights = None
+        # asymmetry/restoring force is given as alpha in paper
+        def update_gn_weights(gn_state, original_losses, critic, num_tasks, task_ids, next_q_value, asymmetry=0.12): 
 
             # Get grads and loss for each task
             def get_task_grad(task_idx: int, task_weights: Array) -> Array:
@@ -422,36 +420,31 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 flat_grad, _ = jax.flatten_util.ravel_pytree(grad)
                 return flat_grad, loss
 
-            # task_grads, task_losses = jax.vmap(get_task_grad)(jnp.arange(num_tasks).reshape(-1,1))
-            # _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), jax.lax.stop_gradient(task_losses), original_losses)
-
-
             def gn_loss(params): # Could also try original losses
-                task_weights = extract_task_weights(params, task_ids)
+                task_weights = extract_task_weights(params, task_ids) # Get normalised task weights
+
+                # Compute task specific losses and grads
                 task_grads, task_losses = jax.vmap(get_task_grad, in_axes=(0,None))(jnp.arange(num_tasks).reshape(-1,1), task_weights)
-                _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), task_losses, original_losses)
+                _original_losses = jax.lax.select(jnp.all(jnp.isnan(original_losses)), 
+                                                  jax.lax.stop_gradient(task_losses),
+                                                  original_losses)
+
                 improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)
                 avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)] Scalar
                 rit = improvement / avg_impr
                 grad_norms = jnp.linalg.norm(task_grads, axis=1, ord=2)  # G_W (num_tasks, params) -> (grad_norms,)
                 avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t) Scalar
-                constant = avg_grad_norm * rit ** alpha
-                l_grad = jnp.sum(jnp.abs(grad_norms - constant))# jnp.sum(task_losses - (avg_grad_norm * (rit)**alpha ) )
+                constant = avg_grad_norm * rit ** asymmetry
+                l_grad = jnp.sum(jnp.abs(grad_norms - constant))
                 return l_grad, (_original_losses, task_weights)
 
-            # def gn_loss(params): # Dummy loss for now
-
             (loss, (_original_losses, task_weights)), grads = jax.value_and_grad(gn_loss, has_aux=True)(gn_state.params)
-            # breakpoint()
             _gn_state = gn_state.apply_gradients(grads=grads)
 
-            # print("grads:\n", grads)
-            # # print(task_weights, loss, gn_state.params["params"]["gn_weights"])
-            # print("gn_state params:\n", gn_state.params["params"]["gn_weights"])
-            # print("loss:\n", loss)
-
-            # print("task_weights:\n", task_weights)
-            # print("std: ", jnp.std(task_weights))
+            # weights = (weights / weights.sum() * initial_weights.sum()) # Weight normalisation
+            # since initial_weights are all 1, initial_weights = num_tasks
+            _gn_state.params['params']['gn_weights'] = (_gn_state.params['params']['gn_weights'] / _gn_state.params['params']['gn_weights'].sum())\
+                    * num_tasks
 
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss}
@@ -468,21 +461,9 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 self.alpha, log_probs
             )
 
-            # Only update if using task weights, otherwise should default to mtmhsac
-            # if self.use_task_weights:
-            #     _gn_state, task_weights, _original_losses = update_gn_weights(self.gn_state,
-            #                                                                   original_losses,
-            #                                                                   self.critic,
-            #                                                                   self.num_tasks,
-            #                                                                   jnp.array(task_ids))
-            # else:
-            #     task_weights = None
-            #     _original_losses = original_losses
-            #     _gn_state = self.gn_state
-
+            assert self.use_task_weights, "GradNorm requires task weights"
             _alpha_val = jax.lax.stop_gradient(_alpha_val)
-            # if task_weights is not None:
-            #     task_weights = jax.lax.stop_gradient(task_weights)
+
             _critic, critic_logs, _gn_state, task_weights, _original_losses = update_critic(self.critic,
                                              _alpha_val,
                                              self.gn_state,

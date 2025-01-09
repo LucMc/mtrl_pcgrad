@@ -47,12 +47,13 @@ def get_task_grad(task_idx: int) -> Array:
 
 
 class TestGradNorm:
-    @pytest.fixture
-    def alg_cls(self):
+    
+    def get_alg_cls(self, asymmetry: float):
         SEED = 0
 
         # GRADNORM CLS
         algorithm_conf = GradNormConfig(
+            asymmetry=asymmetry, # Change for testing
             num_tasks=10,
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
@@ -68,7 +69,7 @@ class TestGradNorm:
             ),
             num_critics=2,
             use_task_weights=True, # Turn on when I've updated the task weights update blank pass thru
-            gn_optimizer_config=OptimizerConfig(lr=1e-2) # Just for testing
+            gn_optimizer_config=OptimizerConfig(lr=3e-4) # Just for testing (normally 3e-4)
             
         )
         env = MetaworldConfig(
@@ -103,30 +104,15 @@ class TestGradNorm:
         MTSAC_cls = MTSAC_cls.initialize(algorithm_conf, env, seed=SEED)
 
         return MTSAC_cls, gradnorm_cls
+    
 
-    '''
-    1. Test when alpha=0 it is the same loss as MTSAC
-    2. Test the grads of a task doing worse are emphasised
-    3. Test the grads of a task doing better are lower
-    4. Anything else...
-    '''
-    def test_gradnorm(self, alg_cls):
-        MTSAC_cls, gradnorm_cls = alg_cls
-        # Just overfit MTSAC/GradNorm on some experience to see loss decrease
+    def gen_experience(self, alg_cls, config):
         # spawn off-policy replay buffer
-        config = OffPolicyTrainingConfig(
-                total_steps=int(2e7),
-                buffer_size=int(1e6),
-                batch_size=1280,
-                warmstart_steps=1000
-                )
-
         env_config = MetaworldConfig(
                 env_id="MT10",
                 terminate_on_success=False
                 )
-        
-        replay_buffer = gradnorm_cls.spawn_replay_buffer(env_config, config, SEED)
+        replay_buffer = alg_cls.spawn_replay_buffer(env_config, config, SEED)
 
         # Generate some random experience
         env = env_config.spawn(seed=SEED)
@@ -151,27 +137,46 @@ class TestGradNorm:
                     episodes_ended += 1
 
             obs = next_obs
-            # print(f"Avg Reward: {rewards.mean()}")
+        return replay_buffer
 
-        # print("episodic_rew:\n", *episodic_rew)
-        # print("episodic_len:\n", *episodic_len)
-        # print("episodes_ended:\n", episodes_ended)
+    # def test_critic_uses_weights():
+    #     data = replay_buffer.sample(config.batch_size)
+    #     gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
+    '''
+    1. Test when alpha=0 it is the same loss as MTSAC
+    2. Test the grads of a task doing worse are emphasised
+    3. Test the grads of a task doing better are lower
+    4. Anything else...
+    '''
+    def test_gradnorm(self):
+        config = OffPolicyTrainingConfig(
+                total_steps=int(2e7),
+                buffer_size=int(1e6),
+                batch_size=1280,
+                warmstart_steps=1000
+                )
+        MTASC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=0.1)
+        # Just overfit MTSAC/GradNorm on some experience to see loss decrease
 
-        
+        replay_buffer = self.gen_experience(gradnorm_cls, config)
         original_losses = jnp.full((gradnorm_cls.num_tasks,), jnp.nan)
         task_layer = GradNormWeights(gradnorm_cls.num_tasks)
         # task_layer = nn.Dense(features=gradnorm_cls.num_tasks, use_bias=False)
         task_weights = task_layer.init(gradnorm_cls.key, jnp.ones(gradnorm_cls.num_tasks))
 
         # train GradNormSAC on that experience
-        print("GradNorm")
-        for epoch in range(40):
+        # test_critic_uses_weights()
+        losses = []
+
+        print("GradNorm overfitting to experience test")
+        print("asymmetry:\n", gradnorm_cls.asymmetry)
+        for epoch in range(30):
             data = replay_buffer.sample(config.batch_size)
             
             # uncomment for debugging
-            with jax.disable_jit(): gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses, task_weights)
-            # gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses, task_weights)
-
+            with jax.disable_jit(): gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
+            # gradnorm_cls, logs, original_losses = gradnorm_cls.update(data, original_losses)
+            losses.append(logs["losses/qf_loss"])
             print(f"{epoch} GN epoch - qf loss: {logs["losses/qf_loss"]}")
 
         # train MTMH on that experience
