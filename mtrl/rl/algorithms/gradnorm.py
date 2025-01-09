@@ -77,6 +77,27 @@ AlgorithmConfigType = TypeVar("AlgorithmConfigType", bound=AlgorithmConfig)
 TrainingConfigType = TypeVar("TrainingConfigType", bound=TrainingConfig)
 DataType = TypeVar("DataType", ReplayBufferSamples, Rollout)
 
+# GRADNORM ALGORITHM:
+#
+# Initialize $w_i(0)=1 \forall i$
+# Initialize network weights $\mathcal{W}$
+# Pick value for $\alpha>0$ and pick the weights $W$ (usually the
+#     final layer of weights which are shared between tasks)
+# for $t=0$ to max_train_steps $^{-10}$
+#     Input batch $x_i$ to compute $L_i(t) \forall i$ and
+#         $L(t)=\sum_i w_i(t) L_i(t)$ [standard forward pass]
+#     Compute $G_W^{(i)}(t)$ and $r_i(t) \forall i$
+#     Compute $\bar{G}_W(t)$ by averaging the $G_W^{(i)}(t)$
+#     Compute $L_{\text {grad }}=\sum_i\left|G_W^{(i)}(t)-\bar{G}_W(t) \times\left[r_i(t)\right]^\alpha\right|_1$
+#     Compute GradNorm gradients $\nabla_{w_i} L_{\text {grad }}$, keeping
+#         targets $\bar{G}_W(t) \times\left[r_i(t)\right]^\alpha$ constant
+#     Compute standard gradients $\nabla_{\mathcal{W}} L(t)$
+#     Update $w_i(t) \mapsto w_i(t+1)$ using $\nabla_{w_i} L_{\text {grad }}$
+#     Update $\mathcal{W}(t) \mapsto \mathcal{W}(t+1)$ using $\nabla_{\mathcal{W}} L(t)$ [standard
+#         backward pass]
+#     Renormalize $w_i(t+1)$ so that $\sum_i w_i(t+1)=T$
+# end for
+
 class MultiTaskTemperature(nn.Module):
     num_tasks: int
     initial_temperature: float = 1.0
@@ -153,7 +174,7 @@ class GradNormConfig(AlgorithmConfig):
     initial_temperature: float = 1.0
     num_critics: int = 2
     tau: float = 0.005
-    asymmetry: float = 0.12 # Called alpha in paper
+    asymmetry: float = 0.12 # Called alpha in paper (recommended range 0 < a < 3)
     use_task_weights: bool = True
 
 
@@ -406,7 +427,6 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 
                 def task_loss(params: FrozenDict) -> Float[Array, ""]:
                     q_pred = critic.apply_fn(params, data.observations, data.actions)
-                    # loss = 0.5 * ((q_pred - next_q_value) ** 2 * task_mask.flatten()[:, None]).mean()
                     loss = (
                         0.5
                         * (task_weights * (q_pred - next_q_value) ** 2)
@@ -429,20 +449,19 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                                                   jax.lax.stop_gradient(task_losses),
                                                   original_losses)
 
-                improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)
-                avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)] Scalar
-                rit = improvement / avg_impr
-                grad_norms = jnp.linalg.norm(task_grads, axis=1, ord=2)  # G_W (num_tasks, params) -> (grad_norms,)
-                avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t) Scalar
-                constant = avg_grad_norm * rit ** asymmetry
-                l_grad = jnp.sum(jnp.abs(grad_norms - constant))
+                improvement = task_losses / (_original_losses + 1e-12) # \tilde{L}_i(t)  || (num_tasks,)
+                avg_impr = jnp.mean(improvement, axis=0) # E_{task}[\tilde{L}_i(t)]  || Scalar
+                rit = improvement / avg_impr # (num_tasks,)
+                grad_norms = jnp.linalg.norm(task_grads, axis=1, ord=2)  # G_W  || (num_tasks, params) -> (num_tasks,)
+                avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t)  || Scalar
+                constant = avg_grad_norm * rit ** asymmetry # (num_tasks,)
+                l_grad = jnp.sum(jnp.abs(grad_norms - constant)) # Scalar
                 return l_grad, (_original_losses, task_weights)
 
             (loss, (_original_losses, task_weights)), grads = jax.value_and_grad(gn_loss, has_aux=True)(gn_state.params)
             _gn_state = gn_state.apply_gradients(grads=grads)
 
-            # weights = (weights / weights.sum() * initial_weights.sum()) # Weight normalisation
-            # since initial_weights are all 1, initial_weights = num_tasks
+            # Weight normalisation
             _gn_state.params['params']['gn_weights'] = (_gn_state.params['params']['gn_weights'] / _gn_state.params['params']['gn_weights'].sum())\
                     * num_tasks
 

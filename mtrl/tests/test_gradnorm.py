@@ -155,7 +155,7 @@ class TestGradNorm:
                 batch_size=1280,
                 warmstart_steps=1000
                 )
-        MTASC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=0.1)
+        MTASC_cls, gradnorm_cls = self.get_alg_cls(asymmetry=2)
         # Just overfit MTSAC/GradNorm on some experience to see loss decrease
 
         replay_buffer = self.gen_experience(gradnorm_cls, config)
