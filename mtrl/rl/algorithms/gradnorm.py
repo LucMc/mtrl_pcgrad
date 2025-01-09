@@ -466,7 +466,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                     * num_tasks
 
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
-                                                               'metrics/gradnorm_loss': loss}
+                                                               'metrics/gradnorm_loss': loss,
+                                                               'metrics/asymmetry_const': asymmetry}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
