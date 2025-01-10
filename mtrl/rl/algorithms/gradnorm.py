@@ -469,8 +469,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss,
                                                                'metrics/asymmetry_const': asymmetry,
-                                                               'metrics/gn_weights': task_weights,
-                                                               'metrics/task_losses': task_losses}
+                                                               'metrics/gn_weights': jnp.histogram(task_weights),
+                                                               'metrics/task_losses': jnp.histogram(task_losses)}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
@@ -521,6 +521,9 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
 
         flat_params_crit, _ = flatten_util.ravel_pytree(self.critic.params)
         logs["metrics/critic_params_norm"] = jnp.linalg.norm(flat_params_crit)
+
+        # logs["metrics/gn_weights"] = wandb.Histogram(logs["metrics/gn_weights"])
+        # logs["metrics/task_losses"] = wandb.Histogram(logs["metrics/task_losses"])
 
         critic: CriticTrainState
         critic = critic.replace(
@@ -704,8 +707,6 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 data = replay_buffer.sample(config.batch_size)
                 self, logs, original_losses = self.update(data, original_losses)
 
-                logs["metrics/gn_weights"] = wandb.Histogram(logs["metrics/gn_weights"])
-                logs["metrics/task_losses"] = wandb.Histogram(logs["metrics/task_losses"])
 
                 # Logging
                 if global_step % 100 == 0:
