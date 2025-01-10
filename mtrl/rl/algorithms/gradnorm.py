@@ -457,9 +457,9 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 avg_grad_norm = jnp.mean(grad_norms)  # \bar{G}_W(t)  || Scalar
                 constant = avg_grad_norm * rit ** asymmetry # (num_tasks,)
                 l_grad = jnp.sum(jnp.abs(grad_norms - constant)) # Scalar
-                return l_grad, (_original_losses, task_weights)
+                return l_grad, (_original_losses, task_weights, task_losses)
 
-            (loss, (_original_losses, task_weights)), grads = jax.value_and_grad(gn_loss, has_aux=True)(gn_state.params)
+            (loss, (_original_losses, task_weights, task_losses)), grads = jax.value_and_grad(gn_loss, has_aux=True)(gn_state.params)
             _gn_state = gn_state.apply_gradients(grads=grads)
 
             # Weight normalisation
@@ -469,7 +469,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss,
                                                                'metrics/asymmetry_const': asymmetry,
-                                                               'metrics/gn_weights': task_weights}
+                                                               'metrics/gn_weights': task_weights,
+                                                               'metrics/task_losses': task_losses}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
@@ -704,6 +705,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 self, logs, original_losses = self.update(data, original_losses)
 
                 logs["metrics/gn_weights"] = wandb.Histogram(logs["metrics/gn_weights"])
+                logs["metrics/task_losses"] = wandb.Histogram(logs["metrics/task_losses"])
 
                 # Logging
                 if global_step % 100 == 0:
