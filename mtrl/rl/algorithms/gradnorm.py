@@ -191,7 +191,6 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
     use_task_weights: bool = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
     asymmetry: float = struct.field(pytree_node=False)
-    # original_losses: Array = struct.field(pytree_node=False)
 
     @override
     @staticmethod
@@ -272,7 +271,6 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             use_task_weights=config.use_task_weights,
             num_critics=config.num_critics,
             asymmetry=config.asymmetry
-            # original_losses=jnp.full((config.num_tasks,), jnp.nan)
         )
 
     @override
@@ -435,7 +433,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                         .sum()
                     )
                     return loss
-                
+
                 # Get gradients for each task using vmap
                 loss, grad = jax.value_and_grad(task_loss)(critic.params)
                 flat_grad, _ = jax.flatten_util.ravel_pytree(grad)
@@ -466,11 +464,20 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             _gn_state.params['params']['gn_weights'] = (_gn_state.params['params']['gn_weights'] / _gn_state.params['params']['gn_weights'].sum())\
                     * num_tasks
 
+            # def get_order(arr):
+            #     sorted_indices = np.argsort(arr)
+            #
+            #     ranks = np.empty_like(sorted_indices)
+            #     ranks[sorted_indices] = np.arange(len(arr))
+            #     return ranks
+
+
+            # breakpoint()
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss,
                                                                'metrics/asymmetry_const': asymmetry,
-                                                               'metrics/gn_weights': jnp.histogram(task_weights),
-                                                               'metrics/task_losses': jnp.histogram(task_losses)}
+                                                               'metrics/gn_weights': gn_state.params['params']['gn_weights'],
+                                                               'metrics/task_losses': task_losses}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
