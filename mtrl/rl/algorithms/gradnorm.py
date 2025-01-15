@@ -328,6 +328,7 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
                 self.actor.params, data.next_observations
             ).sample_and_log_prob(seed=critic_loss_key)
 
+            assert self.use_task_weights, "Task weights are required for GradNorm"
             if self.use_task_weights:
                 task_weights = extract_task_weights(gn_state.params, task_ids)
             else:
@@ -476,8 +477,8 @@ class GradNorm(OffPolicyAlgorithm[GradNormConfig]):
             return _gn_state, task_weights, _original_losses, {'metrics/gradnorm_task_weights_std': jnp.std(task_weights),
                                                                'metrics/gradnorm_loss': loss,
                                                                'metrics/asymmetry_const': asymmetry,
-                                                               'metrics/gn_weights': gn_state.params['params']['gn_weights'],
-                                                               'metrics/task_losses': task_losses}
+                                                               'metrics/gn_weights_max': jnp.argmax(gn_state.params['params']['gn_weights']),
+                                                               'metrics/task_losses_max': jnp.argmax(task_losses)}
 
         # --- Actor loss --- & calls for the other losses
         def actor_loss(params: FrozenDict):
